@@ -14,15 +14,9 @@ if not Path(MODEL_PATH).exists():
     urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
     print("Done.")
 
-
-# REPLACE VIDEO FILE NAME HERE
-video= "GX011037.MP4"
-
-
 LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
-# Landmarks for dimension estimation
 FACE_TOP, FACE_BOTTOM = 10, 152
 FACE_LEFT, FACE_RIGHT = 234, 454
 NOSE_TOP, NOSE_TIP    = 168, 4
@@ -30,8 +24,8 @@ LEFT_NOSTRIL, RIGHT_NOSTRIL = 129, 358
 MOUTH_LEFT, MOUTH_RIGHT     = 61, 291
 MOUTH_TOP, MOUTH_BOTTOM     = 13, 14
 
-# Average adult IPD used as real-world scale reference (mm)
-REF_IPD_MM = 63.0
+REF_IPD_MM  = 63.0
+FRAME_SKIP  = 4  # process every Nth frame
 
 def eye_aspect_ratio(eye_points):
     A = distance.euclidean(eye_points[1], eye_points[5])
@@ -49,7 +43,6 @@ def estimate_dimensions(landmarks, w, h):
     pt = lambda i: get_pt(landmarks, i, w, h)
     dist = distance.euclidean
 
-    # IPD from inner/outer eye corners as scale reference
     left_pupil  = ((pt(33)[0] + pt(133)[0]) / 2, (pt(33)[1] + pt(133)[1]) / 2)
     right_pupil = ((pt(362)[0] + pt(263)[0]) / 2, (pt(362)[1] + pt(263)[1]) / 2)
     ipd_px = dist(left_pupil, right_pupil)
@@ -91,11 +84,16 @@ def analyze_video(video_path):
         if not ret:
             break
 
+        frame_num += 1
+
+        # skip frames without decoding for speed
+        if frame_num % FRAME_SKIP != 0:
+            continue
+
         h, w, _ = frame.shape
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
                             data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = detector.detect_for_video(mp_image, int(frame_num * 1000 / fps))
-        frame_num += 1
 
         if not result.face_landmarks:
             continue
@@ -112,8 +110,7 @@ def analyze_video(video_path):
                 total_blinks += 1
             counter = 0
 
-        # accumulate dimensions every 5 frames
-        if frame_num % 5 == 0:
+        if frame_num % 15 == 0:
             dims = estimate_dimensions(lms, w, h)
             for k, v in dims.items():
                 dim_accum[k] = dim_accum.get(k, 0) + v
@@ -130,18 +127,26 @@ def analyze_video(video_path):
         "dimensions":     avg_dims,
     }
 
-def print_report(label, r):
-    print(f"\n── {label} ──")
-    print(f"  Duration       : {r['duration_sec']:.0f}s ({r['duration_sec']/3600:.2f}h)")
-    print(f"  Total blinks   : {r['total_blinks']}")
-    print(f"  Blinks/min     : {r['blinks_per_min']:.4f}")
-    print(f"  Blinks/sec     : {r['blinks_per_sec']:.6f}")
-    d = r["dimensions"]
-    if d:
-        print(f"  Face H x W     : {d['face_height_mm']:.1f} x {d['face_width_mm']:.1f} mm")
-        print(f"  Left eye W     : {d['left_eye_w_mm']:.1f} mm  |  Right eye W: {d['right_eye_w_mm']:.1f} mm")
-        print(f"  Nose H x W     : {d['nose_height_mm']:.1f} x {d['nose_width_mm']:.1f} mm")
-        print(f"  Mouth W x H    : {d['mouth_width_mm']:.1f} x {d['mouth_height_mm']:.1f} mm")
+video_folder = Path("videos")
+all_results = []
+for video_path in sorted(video_folder.glob("*.[Mm][Pp]4")):
+    print(f"Processing {video_path.name}...")
+    result = analyze_video(str(video_path))
+    all_results.append(result)
 
-result = analyze_video(video)
-print_report("Session Results", result)
+total_blinks   = sum(r["total_blinks"] for r in all_results)
+total_duration = sum(r["duration_sec"] for r in all_results)
+
+print(f"\n══ COMBINED SUMMARY ({len(all_results)} videos) ══")
+print(f"  Total duration : {total_duration:.0f}s ({total_duration/3600:.2f}h)")
+print(f"  Total blinks   : {total_blinks}")
+print(f"  Blinks/min     : {total_blinks / (total_duration / 60):.4f}")
+print(f"  Blinks/sec     : {total_blinks / total_duration:.6f}")
+
+all_dims = [r["dimensions"] for r in all_results if r["dimensions"]]
+if all_dims:
+    avg_dims = {k: sum(d[k] for d in all_dims) / len(all_dims) for k in all_dims[0]}
+    print(f"  Face H x W     : {avg_dims['face_height_mm']:.1f} x {avg_dims['face_width_mm']:.1f} mm")
+    print(f"  Left eye W     : {avg_dims['left_eye_w_mm']:.1f} mm  |  Right eye W: {avg_dims['right_eye_w_mm']:.1f} mm")
+    print(f"  Nose H x W     : {avg_dims['nose_height_mm']:.1f} x {avg_dims['nose_width_mm']:.1f} mm")
+    print(f"  Mouth W x H    : {avg_dims['mouth_width_mm']:.1f} x {avg_dims['mouth_height_mm']:.1f} mm")
